@@ -1,0 +1,1253 @@
+#___________________________________________________________________________________________________________
+# title: "INT2023_Growth&Survival"
+# authors: "Ewout Knoester, Gian Lu Dado, Sara Sottoriva"
+# date: "June 27, 2023"
+# output: html_document
+#___________________________________________________________________________________________________________
+
+```{r setup, include=FALSE}
+
+rm(list=ls()) # Clear workspace
+knitr::opts_knit$set(root.dir = '/tmp') #Set directory at current directory for all subsequent chunks
+setwd("/Users/saras//Documents/WUR/MASTER/#SARAINKENYA/2.EXPERIMENT/1.Growth measurements")
+getwd()
+
+library(readxl) # Import excel sheets
+library(tidyverse) # Tidy data
+library(panelr) # Convert data from wide to long
+library(nlme) # GLS
+library(emmeans) # Pairwise comparisons
+library(betareg) # Beta regression
+library(ggthemes) # Pretty plots
+library(car) # ANOVA results GLM
+library(NCmisc) # Check packages used
+library(writexl)
+library(cowplot) # Combine plots
+library(e1071) # Determine skewness coefficient
+library(plyr)
+library(dplyr)
+
+# Function to facilitate averaging datasets
+data_summary <- function(data, varname, groupnames){
+  require(plyr)
+  summary_func <- function(x, col){
+    c(mean = mean(x[[col]], na.rm=TRUE),
+      sd = sd(x[[col]], na.rm=TRUE),
+      n  = length(x[[col]]),
+      se = sd(x[[col]], na.rm=TRUE)/sqrt(length(x[[col]])))
+  }
+  data_sum<-ddply(data, groupnames, .fun=summary_func,
+                  varname)
+  data_sum <- rename(data_sum, c("mean" = varname))
+  return(data_sum)
+}
+
+```
+
+```{r data selection, include=FALSE}
+
+# Import excel sheet
+raw_data <- read_excel("~/Documents/WUR/MASTER/#SARAINKENYA/2.EXPERIMENT/1.Growth measurements/INT2023_Growth&Survival_RAW.xlsx", sheet = "DATA")
+
+# Insert new columns to calculate average SGR over a whole period while maintaining same wide-format style data after the last column of raw_data
+raw.data.1 <- as.data.frame(append(raw_data, list(Date_5 = "2023-07-20", Length_5 = NA,
+                                                    Width1_5 = NA, Width2_5 = NA, EV_5 = NA, Condition_5 = NA, Cause_5 = NA, SGR_5 = NA, Comments_5 = NA), after = (ncol(raw_data))))
+
+## Calculate SGR (Specific Growth Rate) over whole period
+raw.data.1$SGR_5 <- log(raw.data.1$EV_4/raw.data.1$EV_0)/as.numeric(as.Date(as.character(raw.data.1$Date_4), format="%Y-%m-%d") - as.Date(as.character(raw.data.1$Date_0), format="%Y-%m-%d"))
+
+raw.data.1$SGR_4<-log(raw.data.1$EV_4/raw.data.1$EV_3)/as.numeric(as.Date(as.character(raw.data.1$Date_4), format="%Y-%m-%d") - as.Date(as.character(raw.data.1$Date_3), format="%Y-%m-%d"))
+
+raw.data.1$SGR_3<-log(raw.data.1$EV_3/raw.data.1$EV_2)/as.numeric(as.Date(as.character(raw.data.1$Date_3), format="%Y-%m-%d") - as.Date(as.character(raw.data.1$Date_2), format="%Y-%m-%d"))
+
+raw.data.1$SGR_2<-log(raw.data.1$EV_2/raw.data.1$EV_1)/as.numeric(as.Date(as.character(raw.data.1$Date_2), format="%Y-%m-%d") - as.Date(as.character(raw.data.1$Date_1), format="%Y-%m-%d"))
+
+raw.data.1$SGR_1<-log(raw.data.1$EV_1/raw.data.1$EV_0)/as.numeric(as.Date(as.character(raw.data.1$Date_1), format="%Y-%m-%d") - as.Date(as.character(raw.data.1$Date_0), format="%Y-%m-%d"))
+
+## Fill in end Condition for Average time factor (NB: end Condition will be used in analysis)
+raw.data.1$Condition_5 <- raw.data.1$Condition_4
+raw.data.1$Cause_5 <- raw.data.1$Cause_4
+
+# Convert to long data frame
+raw.data.2 <- as.data.frame(long_panel(raw.data.1, prefix = "_" , begin = 0, end = 5, label_location = "end"))
+
+## Set species and rename
+species.order = c("Acropora tenuis",
+                  "Stylophora pistillata")
+raw.data.2 %<>% 
+  mutate(Species = Species %>% 
+           factor(levels = species.order))
+
+## Read in NAs properly
+raw.data.2$SGR[raw.data.2$SGR == "NA"] <- NA
+raw.data.2$Cause[raw.data.2$Cause == "NA"] <- NA
+
+## Set correct data types
+raw.data.2$SGR <- as.numeric(raw.data.2$SGR)
+raw.data.2$Date <- format(raw.data.2$Date, "%m/%Y")
+
+## Merge overlapping months for visualization purposes
+date.order = c("02/2023", "03/2023", "04/2023", "05/2023", "06/2023", "07/2023") 
+
+raw.data.2 %<>%
+  mutate(Date = Date %<>% 
+           factor(levels = date.order)%>% 
+  fct_recode('Average' = '07/2023'))
+
+# Drop and reorder some columns
+clean.data <- raw.data.2 %>%
+  dplyr::select(c("id", "Structure", "Position", "Species", 
+           "Date", "Length", "Cause", "EV","Condition", "SGR")) 
+
+# Tidy formatting data frame
+clean.data$Length <- round(clean.data$Length, 1)
+clean.data$EV <- round(clean.data$EV, 0)
+clean.data$SGR <- round(clean.data$SGR, 3)
+
+# Export data selection
+write_xlsx(clean.data, "~/Documents/WUR/MASTER/#SARAINKENYA/2.EXPERIMENT/1.Growth measurements/Analysis/Outcome/SGR/INT_Cleaning experiment.xlsx")
+
+```
+
+```{r data cleaning}
+
+# Import excel sheet
+clean.data.1 <- read_excel("~/Documents/WUR/MASTER/#SARAINKENYA/2.EXPERIMENT/1.Growth measurements/Analysis/Outcome/SGR/INT_Cleaning experiment.xlsx", sheet = 1)
+
+# Set correct data types
+clean.data.1$Structure <- factor(clean.data.1$Structure)
+clean.data.1$Species <- as.factor(clean.data.1$Species)
+clean.data.1$SGR <- as.numeric(clean.data.1$SGR)
+clean.data.1$Cause <- factor(clean.data.1$Cause)
+clean.data.1$Date <- ordered(clean.data.1$Date, c("02/2023", "03/2023","04/2023","05/2023", "06/2023", "Average"))
+
+# Create subset to inspect missing, lost and dead values
+missing <- subset(clean.data.1, Cause == "missing" & Date != "Average")
+dead<-subset(clean.data.1, Cause == "dead" & Date != "Average")
+
+## Summary of missing values 
+### Indicating that missing fragments are roughly equally distributed across Treatments
+summary(missing)
+summary(dead)
+
+#! Decision to leave out missing fragments from analysis as pattern is not related to Treatment
+clean.data.1 <- clean.data.1[-which(clean.data.1$Cause == "missing"),]
+
+# Remove IDs with missing data (comment "missing data")
+#clean.data.1 <- raw.data.2[-which(raw.data.2$Comments == "missing data")]
+
+write_xlsx(clean.data.1, "~/Documents/WUR/MASTER/#SARAINKENYA/2.EXPERIMENT/1.Growth measurements/Analysis/Outcome/SGR/INT_Cleaning experiment_new.xlsx")
+```
+
+
+# SGR ANALYSIS
+
+```{r SGR: data preparation}
+
+#Import excel sheet
+clean.data.1 <- read_excel("~/Documents/WUR/MASTER/#SARAINKENYA/2.EXPERIMENT/1.Growth measurements/Analysis/Outcome/SGR/INT_Cleaning experiment_new.xlsx", sheet = 1)
+
+# DATA PREP
+## Create subset for SGR where Condition > 80: only healthy corals will be used to determine SGR
+sgr.data <- subset(clean.data.1, Condition >= 80 | is.na(Condition))
+sgr.data.1 <- subset(sgr.data, Date != "Average") # Exclude Average-data
+sgr.data.1 <- subset(sgr.data.1, !(is.na(SGR))) # Exclude SGR with NA
+
+sgr.data.1 <- sgr.data.1 %>% separate(Structure, c('Treatment', 'Tree'))
+sgr.data.1$Treatment <- factor(sgr.data.1$Treatment, c("II", "IS", "SS", "SI"))
+sgr.data.1$Tree <- factor(sgr.data.1$Tree)
+sgr.data.1$Position <- factor(sgr.data.1$Position)
+sgr.data.1$Species <- factor(sgr.data.1$Species)
+sgr.data.1$Date <- ordered(sgr.data.1$Date, c("03/2023", "04/2023", "05/2023", "06/2023"))
+
+## Exclude columns not used
+sgr.data.1 <- sgr.data.1 %>%
+  dplyr::select(-c("Length", "Cause", "Condition", "EV"))
+
+## Visualize time effect - WITH March SGR
+sgr.data.summary.x <- data_summary(sgr.data.1, varname = "SGR", groupnames = c("Species", "Treatment", "Date"))
+
+ggplot(sgr.data.summary.x, aes(x = Date, fill = Treatment, y = SGR))+
+  geom_bar(stat = "identity", position = position_dodge(), na.rm = TRUE)+
+  labs(y = expression(paste("SGR (", d^-1,")")))+
+  scale_y_continuous(expand=c(0, 0), limits=c(-0.004, 0.024))+
+  facet_grid(Species ~ Treatment)+
+  geom_errorbar(aes(ymin=SGR-(1*se), ymax=SGR+(1*se)), width=.2,
+                position=position_dodge(.9))+
+  scale_fill_manual(values=c("#A9A9A9", "#7A7A7A", "#5A5A5A", "#3A3A3A"))+
+  theme_light()+
+  theme(
+    legend.position="top",
+    strip.text.y = element_text(size = 10, face = "italic"),
+    axis.text.x = element_text(size=11, angle = 90, vjust = 0.5, hjust=1),
+    axis.text.y = element_text(size=10))
+ggsave("All_SGR.tiff", width = 18, height = 24, units = "cm", dpi=1200, compression = "lzw")
+
+# Remove data from February and March (we don't want to include March SGR)
+sgr.data.1 <- subset(sgr.data.1, Date != "02/2023")
+sgr.data.1 <- subset(sgr.data.1, Date != "03/2023")
+
+## Visualize time effect - WITHOUT March SGR
+sgr.data.summary <- data_summary(sgr.data.1, varname = "SGR", groupnames = c("Species", "Treatment", "Date"))
+
+ggplot(sgr.data.summary, aes(x = Date, fill = Treatment, y = SGR))+
+  geom_bar(stat = "identity", position = position_dodge(), na.rm = TRUE)+
+  labs(y = expression(paste("SGR (", d^-1,")")))+
+  scale_y_continuous(expand=c(0, 0), limits=c(-0.004, 0.024))+
+  facet_grid(Species ~ Treatment)+
+  geom_errorbar(aes(ymin=SGR-(1*se), ymax=SGR+(1*se)), width=.2,
+                position=position_dodge(.9))+
+  scale_fill_manual(values=c("#A9A9A9", "#7A7A7A", "#5A5A5A", "#3A3A3A"))+
+  theme_light()+
+  theme(
+    legend.position="top",
+    strip.text.y = element_text(size = 10, face = "italic"),
+    axis.text.x = element_text(size=11, angle = 90, vjust = 0.5, hjust=1),
+    axis.text.y = element_text(size=10))
+ggsave("All_SGR.tiff", width = 18, height = 24, units = "cm", dpi=1200, compression = "lzw")
+
+sgr.data.1.summary <- data_summary(sgr.data.1, varname = "SGR", groupnames = c("Species", "Treatment", "Date","Position"))
+
+```
+
+```{r SGR: model selection}
+
+# MODELLING
+### Full linear model without random factor
+lm.sgr  <- gls(SGR ~ Treatment*Species*Date, method = "REML", na.action = na.omit,
+                   data = sgr.data.1) # AIC = -10750.30	
+
+### Linear mixed-effect model with random factor
+# Random factor to account for non-independence of multiple coral fragments in same nursery Structure
+lme.sgr.1r  <- lme(SGR ~ Treatment*Species*Date, method = "REML", na.action = na.omit, random = ~1 | Tree, data = sgr.data.1) # AIC = -10748.47
+
+## Allowing for heterogeneity among Species (showed best residuals of all Species * Treatment combis)
+lme.sgr.2r.S  <- lme(SGR ~ Treatment*Species*Date, method = "REML", na.action = na.omit, random = ~1 |
+                       Position, data = sgr.data.1, weights = varIdent(form = ~1 | Species)) # AIC = -10747.17
+AIC(lm.sgr, lme.sgr.1r, lme.sgr.2r.S) #The lower the value, the better the model fits; even tho the lower value is with the linear model, we choose to use the linear mixed-effect model (1 random factor) because we can't consider the fragments from the same tree as independent
+
+## Model output
+Anova(lme.sgr.1r) # all the one-way interactions (Treatment, Species, Date) are highly significant; Two-way interactions Treatment:Date and Species:Date are as well highly significant
+
+```
+
+```{r SGR: model validation}
+
+# Data is normally distributed
+mod <- lme.sgr.1r # set model of Treatment, Species and Date to be validated
+op <- par(mfrow = c(2, 4), mar = c(5, 4, 1, 2)) # set layout of figure frame
+plot(resid(mod, type = "pearson") ~ fitted(mod)) # fitted vs residuals
+abline(0,0)
+hist(resid(mod, type = "pearson"), main = "") # histogram residuals
+qqnorm(resid(mod, type = "pearson")) # QQplot residuals
+plot(sgr.data.1$Treatment, resid(mod, type = "pearson")) # residuals split over Date
+abline(0,0)
+plot(sgr.data.1$Species, resid(mod, type = "pearson")) # residuals split over Treatment
+abline(0,0)
+plot(sgr.data.1$Date, resid(mod, type = "pearson")) # residuals split over Position
+abline(0,0)
+plot(fitted(mod) ~ sgr.data.1$SGR) # response data vs fitted
+par(op)
+
+```
+
+```{r SGR: plots}
+
+## PLOT 1: Treatment*Species*Date
+# Get averages
+sgr.summary.TSD <- data_summary(sgr.data.1, varname = "SGR", groupnames = c("Treatment", "Species", "Date"))
+
+# Create unique Finder for each Species*Date*Treatment combination
+sgr.summary.TSD <- as.data.frame(append(sgr.summary.TSD,
+    list(Finder = paste(paste(sgr.summary.TSD$Species, sgr.summary.TSD$Date, sep=":"), sgr.summary.TSD$Treatment,
+    sep=":")), after = 0))
+
+# Create ID and order dataframe by name of Finder
+sgr.summary.TSD <- tibble::rownames_to_column(sgr.summary.TSD, "ID")
+sgr.summary.TSD <- sgr.summary.TSD[order(sgr.summary.TSD$Finder),]
+
+# Post hoc comparison
+hsd.TSD <- emmeans(lme.sgr.1r, specs = pairwise ~ Treatment | Date * Species, adjust = "tuckey") 
+letters.TSD <- multcomp::cld(hsd.TSD$emmeans, alpha = 0.05, Letters = letters, decreasing = T) # get CLD
+# hsd.sgr.TSD$contrast #to check all the singular p-values
+
+# Create ID and order dataframe by name (equals Finder of sgr.summary.TSD dataframe)
+letters.TSD <- tibble::rownames_to_column(letters.TSD, "Group")
+letters.TSD <- as.data.frame(append(letters.TSD,
+     list(Finder = paste(paste(letters.TSD$Species, letters.TSD$Date, sep=":"), letters.TSD$Treatment,
+    sep=":")), after = 0))
+letters.TSD <- letters.TSD[order(letters.TSD$Finder),]
+letters.TSD <- letters.TSD %>% mutate(.group = str_squish(.group)) # remove white spaces
+
+# Merge sig.letter dataframe into the summary dataframe
+sgr.summary.TSD <- cbind(sgr.summary.TSD, siglet = letters.TSD$.group)
+sgr.summary.TSD <- sgr.summary.TSD[order(as.numeric(sgr.summary.TSD$ID)),]
+
+# Labels facet grip
+spec.labs <- c("A. tenuis", "S. pistillata")
+names(spec.labs) <- c("Acropora tenuis", "Stylophora pistillata")
+
+# Plot Species*Date*Treatment bar graph + error bars + letters
+SGR_TreatmentxSpeciesxDate <- ggplot(sgr.summary.TSD, aes(x = Date, fill = Treatment, y = SGR))+
+  geom_bar(stat = "identity", position = position_dodge())+ 
+  labs(y = expression(paste("SGR (", d^-1,")")), x = "Date")+ facet_grid(rows=vars(Species), labeller = labeller(Species = spec.labs)) +
+  geom_errorbar(aes(ymin=SGR-(1*se), ymax=SGR+(1*se)), width=.2,
+                position=position_dodge(.9))+
+  geom_text(data = sgr.summary.TSD, aes(x=Date, y = SGR + se+0.0015, label = ""),vjust=0, position = position_dodge(.9))+
+  scale_fill_manual(values=c("#A9A9A9", "#7A7A7A", "#5A5A5A", "#3A3A3A"))+
+  theme_economist()+scale_colour_economist()+
+  theme(
+    axis.title.x = element_text(color="black", vjust=-2, size = 12),
+    axis.text.x = element_text(angle = 0, size=12, face = "bold.italic", vjust=0.5),
+    axis.title.y = element_text(color="black" , vjust=4, size = 12),
+    axis.text.y=element_text(size=12, face = "bold", vjust=0.5),
+    strip.text.y = element_text(size = 12, face = "bold.italic")
+    )+
+  scale_y_continuous(limits=c(-0.005,0.03), breaks = c(0, 0.005, 0.01, 0.015, 0.02, 0.025), expand = c(0, 0))
+
+SGR_TreatmentxSpeciesxDate
+ggsave("INT_SGR_Treatment x Species x Date.jpeg")
+
+
+## PLOT 2: Treatment
+# Get averages
+sgr.summary.T <- data_summary(sgr.data.1, varname = "SGR", groupnames = c("Treatment"))
+
+# Create unique Finder for each Species*Date*Treatment combination
+sgr.summary.T <- as.data.frame(append(sgr.summary.T,
+    list(Finder = paste(sgr.summary.T$Treatment,
+    sep=":")), after = 0))
+
+# Create ID and order dataframe by name of Finder
+sgr.summary.T <- tibble::rownames_to_column(sgr.summary.T, "ID")
+sgr.summary.T <- sgr.summary.T[order(sgr.summary.T$Finder),]
+
+# Post hoc comparison
+hsd.T <- emmeans(lme.sgr.1r, specs = pairwise ~ Treatment, adjust = "tuckey") 
+letters.T <- multcomp::cld(hsd.T$emmeans, alpha = 0.05, Letters = letters, decreasing = T) # get CLD
+
+# Create ID and order dataframe by name (equals Finder of sgr.summary.TSD dataframe)
+letters.T <- tibble::rownames_to_column(letters.T, "Group")
+letters.T <- as.data.frame(append(letters.T,
+     list(Finder = paste(letters.T$Treatment,
+    sep=":")), after = 0))
+letters.T <- letters.T[order(letters.T$Finder),]
+letters.T <- letters.T %>% mutate(.group = str_squish(.group)) # remove white spaces
+
+# Merge sig.letter dataframe into the summary dataframe
+sgr.summary.T <- cbind(sgr.summary.T, siglet = letters.T$.group)
+sgr.summary.T <- sgr.summary.T[order(as.numeric(sgr.summary.T$ID)),]
+
+## Plot Treatment 
+SGR_Treatment <- ggplot(sgr.summary.T, aes(x = Treatment, y = SGR))+
+  geom_bar(stat = "identity", position = position_dodge())+ 
+  labs(y = expression(paste("SGR (", d^-1,")")), x = "Treatment")+ 
+  geom_errorbar(aes(ymin=SGR-(1*se), ymax=SGR+(1*se)), width=.2,
+                position=position_dodge(.9))+
+  geom_text(data = sgr.summary.T, aes(x=Treatment, y = SGR + se+0.0015, label = siglet),vjust=0, position = position_dodge(.9))+
+  scale_fill_manual(values=c("#A9A9A9", "#7A7A7A", "#5A5A5A", "#3A3A3A"))+
+  theme_economist()+scale_colour_economist()+
+  theme(
+    axis.title.x = element_text(color="black", vjust=-2, size = 12),
+    axis.text.x = element_text(angle = 0, size=12, face = "bold", vjust=0.5),
+    axis.title.y = element_text(color="black" , vjust=4, size = 12),
+    axis.text.y=element_text(size=12, face = "bold", vjust=0.5),
+    )+
+  scale_y_continuous(limits=c(-0.001,0.018), breaks = c(0, 0.005, 0.01, 0.015), expand = c(0, 0))
+
+SGR_Treatment
+ggsave("INT_SGR_Treatment.jpeg")
+
+
+## PLOT 3: Species
+# Get averages
+sgr.summary.S <- data_summary(sgr.data.1, varname = "SGR", groupnames = c("Species"))
+
+# Create unique Finder for each Species*Date*Treatment combination
+sgr.summary.S <- as.data.frame(append(sgr.summary.S,
+    list(Finder = paste(sgr.summary.S$Species,
+    sep=":")), after = 0))
+
+# Create ID and order dataframe by name of Finder
+sgr.summary.S <- tibble::rownames_to_column(sgr.summary.S, "ID")
+sgr.summary.S <- sgr.summary.S[order(sgr.summary.S$Finder),]
+
+# Post hoc comparison
+hsd.S <- emmeans(lme.sgr.1r, specs = pairwise ~ Species, adjust = "tuckey") 
+letters.S <- multcomp::cld(hsd.S$emmeans, alpha = 0.05, Letters = letters, decreasing = T) # get CLD
+
+# Create ID and order dataframe by name (equals Finder of sgr.summary.TSD dataframe)
+letters.S <- tibble::rownames_to_column(letters.S, "Group")
+letters.S <- as.data.frame(append(letters.S,
+     list(Finder = paste(letters.S$Species,
+    sep=":")), after = 0))
+letters.S <- letters.S[order(letters.S$Finder),]
+letters.S <- letters.S %>% mutate(.group = str_squish(.group)) # remove white spaces
+
+# Merge sig.letter dataframe into the summary dataframe
+sgr.summary.S <- cbind(sgr.summary.S, siglet = letters.S$.group)
+sgr.summary.S <- sgr.summary.S[order(as.numeric(sgr.summary.S$ID)),]
+
+## Plot Species 
+SGR_Species <- ggplot(sgr.summary.S, aes(x = Species, y = SGR))+
+  geom_bar(stat = "identity", position = position_dodge())+ 
+  labs(y = expression(paste("SGR (", d^-1,")")), x = "Species")+ 
+  geom_errorbar(aes(ymin=SGR-(1*se), ymax=SGR+(1*se)), width=.2,
+                position=position_dodge(.9))+
+  geom_text(data = sgr.summary.S, aes(x=Species, y = SGR + se+0.0015, label = siglet),vjust=0, position = position_dodge(.9))+
+  scale_fill_manual(values=c("#A9A9A9", "#3A3A3A"))+
+  theme_economist()+scale_colour_economist()+
+  theme(
+    axis.title.x = element_text(color="black", vjust=-2, size = 12),
+    axis.text.x = element_text(angle = 0, size=12, face = "bold.italic", vjust=0.5),
+    axis.title.y = element_text(color="black" , vjust=4, size = 12),
+    axis.text.y=element_text(size=12, face = "bold", vjust=0.5),
+    )+
+  scale_y_continuous(limits=c(-0.001,0.018), breaks = c(0, 0.005, 0.01, 0.015), expand = c(0, 0))
+
+SGR_Species
+ggsave("INT_SGR_Species.jpeg")
+
+
+## PLOT 4: Date
+# Get averages
+sgr.summary.D <- data_summary(sgr.data.1, varname = "SGR", groupnames = c("Date"))
+
+# Create unique Finder for each Species*Date*Treatment combination
+sgr.summary.D <- as.data.frame(append(sgr.summary.D,
+    list(Finder = paste(sgr.summary.D$Date,
+    sep=":")), after = 0))
+
+# Create ID and order dataframe by name of Finder
+sgr.summary.D <- tibble::rownames_to_column(sgr.summary.D, "ID")
+sgr.summary.D <- sgr.summary.D[order(sgr.summary.D$Finder),]
+
+# Post hoc comparison
+hsd.D <- emmeans(lme.sgr.1r, specs = pairwise ~ Date, adjust = "tuckey") 
+letters.D <- multcomp::cld(hsd.D$emmeans, alpha = 0.05, Letters = letters, decreasing = T) # get CLD
+
+# Create ID and order dataframe by name (equals Finder of sgr.summary.TSD dataframe)
+letters.D <- tibble::rownames_to_column(letters.D, "Group")
+letters.D <- as.data.frame(append(letters.D,
+     list(Finder = paste(letters.D$Date,
+    sep=":")), after = 0))
+letters.D <- letters.D[order(letters.D$Finder),]
+letters.D <- letters.D %>% mutate(.group = str_squish(.group)) # remove white spaces
+
+# Merge sig.letter dataframe into the summary dataframe
+sgr.summary.D <- cbind(sgr.summary.D, siglet = letters.D$.group)
+sgr.summary.D <- sgr.summary.D[order(as.numeric(sgr.summary.D$ID)),]
+
+## Plot Date 
+SGR_Date <- ggplot(sgr.summary.D, aes(x = Date, y = SGR))+
+  geom_bar(stat = "identity", position = position_dodge())+ 
+  labs(y = expression(paste("SGR (", d^-1,")")), x = "Date")+ 
+  geom_errorbar(aes(ymin=SGR-(1*se), ymax=SGR+(1*se)), width=.2,
+                position=position_dodge(.9))+
+  geom_text(data = sgr.summary.D, aes(x=Date, y = SGR + se+0.0015, label = siglet),vjust=0, position = position_dodge(.9))+
+  scale_fill_manual(values=c("#A9A9A9", "#7A7A7A", "#5A5A5A", "#3A3A3A"))+
+  theme_economist()+scale_colour_economist()+
+  theme(
+    axis.title.x = element_text(color="black", vjust=-2, size = 12),
+    axis.text.x = element_text(angle = 0, size=12, face = "bold", vjust=0.5),
+    axis.title.y = element_text(color="black" , vjust=4, size = 12),
+    axis.text.y=element_text(size=12, face = "bold", vjust=0.5),
+    )+
+  scale_y_continuous(limits=c(-0.001,0.020), breaks = c(0, 0.005, 0.01, 0.015, 0.020), expand = c(0, 0))
+
+SGR_Date
+ggsave("INT_SGR_Date.jpeg")
+
+
+## PLOT 4: Date*Treatment 
+# Get averages
+sgr.summary.TD <- data_summary(sgr.data.1, varname = "SGR", groupnames = c("Date", "Treatment"))
+
+# Create unique Finder for each Date*Treatment combination
+sgr.summary.TD <- as.data.frame(append(sgr.summary.TD,
+                                       list(Finder = paste(sgr.summary.TD$Date, sgr.summary.TD$Treatment, sep=":")), after = 0))
+# Create ID and order dataframe by name of Finder
+sgr.summary.TD <- tibble::rownames_to_column(sgr.summary.TD, "ID")
+sgr.summary.TD <- sgr.summary.TD[order(as.character(sgr.summary.TD$Finder)),]
+
+# Perform post hoc and get significance letters (Compact Letter Display) between Treatments within each Date
+hsd.sgr.TD <- emmeans(lme.sgr.1r, specs = pairwise ~ Treatment|Date, adjust = "tukey")
+#install.packages("multcompView")
+letters.sgr.TD <- multcomp::cld(hsd.sgr.TD$emmeans, decreasing = TRUE, alpha = 0.05, Letters = letters) # get CLD
+
+# Create ID and order dataframe by name (equals Finder of sgr.summary.SS dataframe)
+letters.sgr.TD <- as.data.frame(append(letters.sgr.TD,
+                                   list(Finder = paste(letters.sgr.TD$Date, letters.sgr.TD$Treatment, sep=":")), after = 0))
+letters.sgr.TD <- letters.sgr.TD[order(letters.sgr.TD$Finder),]
+letters.sgr.TD <- letters.sgr.TD %>% mutate(.group = str_squish(.group)) # remove white spaces
+
+# Merge sig.letter dataframe into the summary dataframe
+sgr.summary.TD <- cbind(sgr.summary.TD, siglet = letters.sgr.TD$.group)
+sgr.summary.TD <- sgr.summary.TD[order(as.numeric(sgr.summary.TD$ID)),]
+
+# Plot Treatment x Date
+SGR_DatexTreatment <- ggplot(sgr.summary.TD, aes(x = Date, fill = Treatment, y = SGR))+
+  geom_bar(stat = "identity", position = position_dodge())+ 
+  labs(y = expression(paste("SGR (", d^-1,")")), x = "Date")+
+  scale_y_continuous(limits=c(0, 0.021), breaks = c(0, 0.005, 0.01, 0.015, 0.02, 0.025), expand = c(0, 0))+
+  geom_errorbar(aes(ymin=SGR-(1*se), ymax=SGR+(1*se)), width=.2, position=position_dodge(.9))+
+  geom_text(data = sgr.summary.TD, aes(x=Date, y = SGR + se+0.0004, label = siglet),
+            vjust=0, position = position_dodge(.9))+
+  scale_fill_manual(values=c("#A9A9A9", "#7A7A7A", "#5A5A5A", "#3A3A3A"))+
+  theme_economist()+scale_colour_economist()+
+  theme(
+    axis.title.x = element_text(color="black" , vjust=4, size = 12, margin = margin(t = 20, r = 0, b = 0, l = 0)),
+    axis.text.x = element_text(size=12, face = "bold", vjust=0.5),
+    axis.title.y = element_text(color="black" , vjust=4, size = 12, margin = margin(t = 0, r = 10, b = 0, l = 10)),
+    axis.text.y=element_text(size=12, face = "bold", vjust=0.5),
+    axis.ticks.length.x = unit(c(0,2), "mm"))
+
+SGR_DatexTreatment
+ggsave("INT_SGR_Date x Treatment.pdf") #save image
+
+
+## PLOT 5: Date*Species
+# Get averages
+sgr.summary.SD <- data_summary(sgr.data.1, varname = "SGR", groupnames = c("Date", "Species"))
+
+# Create unique Finder for each Treatment*Species combination
+sgr.summary.SD <- as.data.frame(append(sgr.summary.SD,
+                                       list(Finder = paste(sgr.summary.SD$Date, sgr.summary.SD$Species, sep=":")), after = 0))
+
+# Create ID and order dataframe by name of Finder
+sgr.summary.SD <- tibble::rownames_to_column(sgr.summary.SD, "ID")
+sgr.summary.SD <- sgr.summary.SD[order(as.character(sgr.summary.SD$Finder)),]
+
+# Perform post hoc and get significance letters (Compact Letter Display) between Treatments within each Species
+hsd.sgr.SD <- emmeans(lme.sgr.1r, specs = pairwise ~ Species|Date, adjust = "tukey")
+#install.packages("multcompView")
+letters.sgr.SD <- multcomp::cld(hsd.sgr.SD$emmeans, decreasing = TRUE, alpha = 0.05, Letters = letters) # get CLD
+
+# Create ID and order dataframe by name (equals Finder of sgr.summary.SS dataframe)
+letters.sgr.SD <- as.data.frame(append(letters.sgr.SD,
+                                   list(Finder = paste(letters.sgr.SD$Date, letters.sgr.SD$Species, sep=":")), after = 0))
+letters.sgr.SD <- letters.sgr.SD[order(letters.sgr.SD$Finder),]
+letters.sgr.SD <- letters.sgr.SD %>% mutate(.group = str_squish(.group)) # remove white spaces
+
+# Merge sig.letter dataframe into the summary dataframe
+sgr.summary.SD <- cbind(sgr.summary.SD, siglet = letters.sgr.SD$.group)
+sgr.summary.SD <- sgr.summary.SD[order(as.numeric(sgr.summary.SD$ID)),]
+
+# Plot Species x Date
+SGR_DatexSpecies <- ggplot(sgr.summary.SD, aes(x = Date, fill = Species, y = SGR))+
+  geom_bar(stat = "identity", position = position_dodge())+ 
+  labs(y = expression(paste("SGR (", d^-1,")")), x = "Species")+
+  scale_y_continuous(limits=c(0, 0.021), breaks = c(0, 0.005, 0.01, 0.015, 0.02, 0.025), expand = c(0, 0))+
+  geom_errorbar(aes(ymin=SGR-(1*se), ymax=SGR+(1*se)), width=.2, position=position_dodge(.9))+
+  geom_text(data = sgr.summary.SD, aes(x=Date, y = SGR + se+0.0004, label = siglet),
+            vjust=0, position = position_dodge(.9))+
+  scale_fill_manual(values=c("#A9A9A9", "#3A3A3A"))+
+  theme_economist()+scale_colour_economist()+
+  theme(
+    axis.title.x = element_text(color="black" , vjust=4, size = 12, margin = margin(t = 20, r = 0, b = 0, l = 0)),
+    axis.text.x = element_text(size=12, face = "bold", vjust=0.5),
+    axis.title.y = element_text(color="black" , vjust=4, size = 12, margin = margin(t = 0, r = 10, b = 0, l = 10)),
+    axis.text.y=element_text(size=12, face = "bold", vjust=0.5),
+    axis.ticks.length.x = unit(c(0,2), "mm"))+
+  scale_x_discrete(labels= c("04/2023", "05/2023", "06/2023"))
+
+SGR_DatexSpecies
+ggsave("INT_SGR_Species x Date.pdf") #save image
+
+
+## PLOT 6: Species*Treatment 
+# Get averages
+sgr.summary.ST <- data_summary(sgr.data.1, varname = "SGR", groupnames = c("Species", "Treatment"))
+
+# Create unique Finder for each Treatment*Species combination
+sgr.summary.ST <- as.data.frame(append(sgr.summary.ST,
+                                       list(Finder = paste(sgr.summary.ST$Species, sgr.summary.ST$Treatment, sep=":")), after = 0))
+
+# Create ID and order dataframe by name of Finder
+sgr.summary.ST <- tibble::rownames_to_column(sgr.summary.ST, "ID")
+sgr.summary.ST <- sgr.summary.ST[order(as.character(sgr.summary.ST$Finder)),]
+
+# Perform post hoc and get significance letters (Compact Letter Display) between Treatments within each Species
+hsd.sgr.ST <- emmeans(lme.sgr.1r, specs = pairwise ~ Treatment|Species, adjust = "tukey")
+#install.packages("multcompView")
+letters.sgr.ST <- multcomp::cld(hsd.sgr.ST$emmeans, decreasing = TRUE, alpha = 0.05, Letters = letters) # get CLD
+
+# Create ID and order dataframe by name (equals Finder of sgr.summary.SS dataframe)
+letters.sgr.ST <- as.data.frame(append(letters.sgr.ST,
+                                   list(Finder = paste(letters.sgr.ST$Species, letters.sgr.ST$Treatment, sep=":")), after = 0))
+letters.sgr.ST <- letters.sgr.ST[order(letters.sgr.ST$Finder),]
+letters.sgr.ST <- letters.sgr.ST %>% mutate(.group = str_squish(.group)) # remove white spaces
+
+# Merge sig.letter dataframe into the summary dataframe
+sgr.summary.ST <- cbind(sgr.summary.ST, siglet = letters.sgr.ST$.group)
+sgr.summary.ST <- sgr.summary.ST[order(as.numeric(sgr.summary.ST$ID)),]
+
+
+# Plot Species x Treatment
+SGR_SpeciesxTreatment <- ggplot(sgr.summary.ST, aes(x = Species, fill = Treatment, y = SGR))+
+  geom_bar(stat = "identity", position = position_dodge())+ 
+  labs(y = expression(paste("SGR (", d^-1,")")), x = "Species")+
+  scale_y_continuous(limits=c(0, 0.018), breaks = c(0, 0.005, 0.01, 0.015), expand = c(0, 0))+
+  geom_errorbar(aes(ymin=SGR-(1*se), ymax=SGR+(1*se)), width=.2, position=position_dodge(.9))+
+  geom_text(data = sgr.summary.ST, aes(x=Species, y = SGR + se+0.0004, label = ""),
+            vjust=0, position = position_dodge(.9))+
+  scale_fill_manual(values=c("#A9A9A9", "#7A7A7A", "#5A5A5A", "#3A3A3A"))+
+  theme_economist()+scale_colour_economist()+
+  theme(
+    axis.title.x = element_text(color="black" , vjust=4, size = 12, margin = margin(t = 20, r = 0, b = 0, l = 0)),
+    axis.text.x = element_text(size=12, face = "bold", vjust=0.5),
+    axis.title.y = element_text(color="black" , vjust=4, size = 12, margin = margin(t = 0, r = 10, b = 0, l = 10)),
+    axis.text.y=element_text(size=12, face = "bold", vjust=0.5),
+    axis.ticks.length.x = unit(c(0,2), "mm"))+
+  scale_x_discrete(labels= c("A. tenuis", "S. pistillata"))
+
+SGR_SpeciesxTreatment
+ggsave("INT_SGR_Species x Treatment.jpeg") #save image
+
+
+## PLOT 7: Treatment*Species 
+# Get averages
+sgr.summary.ST <- data_summary(sgr.data.1, varname = "SGR", groupnames = c("Treatment", "Species"))
+
+# Create unique Finder for each Treatment*Species combination
+sgr.summary.ST <- as.data.frame(append(sgr.summary.ST,
+                                       list(Finder = paste(sgr.summary.ST$Treatment, sgr.summary.ST$Species, sep=":")), after = 0))
+
+# Create ID and order dataframe by name of Finder
+sgr.summary.ST <- tibble::rownames_to_column(sgr.summary.ST, "ID")
+sgr.summary.ST <- sgr.summary.ST[order(as.character(sgr.summary.ST$Finder)),]
+
+# Perform post hoc and get significance letters (Compact Letter Display) between Treatments within each Species
+hsd.sgr.ST <- emmeans(lme.sgr.1r, specs = pairwise ~ Species|Treatment, adjust = "tukey")
+#install.packages("multcompView")
+letters.sgr.ST <- multcomp::cld(hsd.sgr.ST$emmeans, decreasing = TRUE, alpha = 0.05, Letters = letters) # get CLD
+
+# Create ID and order dataframe by name (equals Finder of sgr.summary.SS dataframe)
+letters.sgr.ST <- as.data.frame(append(letters.sgr.ST,
+                                   list(Finder = paste(letters.sgr.ST$Treatment, letters.sgr.ST$Species, sep=":")), after = 0))
+letters.sgr.ST <- letters.sgr.ST[order(letters.sgr.ST$Finder),]
+letters.sgr.ST <- letters.sgr.ST %>% mutate(.group = str_squish(.group)) # remove white spaces
+
+# Merge sig.letter dataframe into the summary dataframe
+sgr.summary.ST <- cbind(sgr.summary.ST, siglet = letters.sgr.ST$.group)
+sgr.summary.ST <- sgr.summary.ST[order(as.numeric(sgr.summary.ST$ID)),]
+
+# Plot Treatment x Species
+SGR_TreatmentxSpecies <- ggplot(sgr.summary.ST, aes(x = Treatment, fill = Species, y = SGR))+
+  geom_bar(stat = "identity", position = position_dodge())+ 
+  labs(y = expression(paste("SGR (", d^-1,")")), x = "Treatment", c("II", "SI", "SS", "IS"))+
+  scale_y_continuous(limits=c(0, 0.018), breaks = c(0, 0.005, 0.01, 0.015), expand = c(0, 0))+
+  geom_errorbar(aes(ymin=SGR-(1*se), ymax=SGR+(1*se)), width=.2, position=position_dodge(.9))+
+  geom_text(data = sgr.summary.ST, aes(x=Treatment, y = SGR + se+0.0004, label = ""),
+            vjust=0, position = position_dodge(.9))+
+  scale_fill_manual(values=c("#A9A9A9", "#3A3A3A"))+
+  theme_economist()+scale_colour_economist()+
+  theme(
+    axis.title.x = element_text(color="black" , vjust=4, size = 12, margin = margin(t = 20, r = 0, b = 0, l = 0)),
+    axis.text.x = element_text(size=12, face = "bold", vjust=0.5),
+    axis.title.y = element_text(color="black" , vjust=4, size = 12, margin = margin(t = 0, r = 10, b = 0, l = 10)),
+    axis.text.y=element_text(size=12, face = "bold", vjust=0.5),
+    axis.ticks.length.x = unit(c(0,2), "mm"))
+
+SGR_TreatmentxSpecies
+ggsave("INT_SGR_Treatment x Species.jpeg") #save image
+
+```
+
+```{r SGR - HALF PLOT}
+# throught the experiment we assign half of the plot to Judy and half to me, to have more consistent pictures and ImageJ analysis
+# we want to check whether this division created different patterns in SGR
+
+## SARA HALF
+# creating data set with only Saras half plots
+half.S <- c("SI_40", "II_36", "II_34", "SI_32", "II_41", "II_35", "SI_45", "SI_47", "SI_38", "II_39", "II_47", "SI_48", "SI_46", "SI_42", "SI_31", "II_38", "II_40", "II_48", "SI_41", "II_45", "IS_34", "IS_33", "SS_34", "IS_32", "IS_49", "IS_36", "IS_40", "SS_32", "SS_42", "SS_31", "SS_38", "IS_37", "IS_39", "SS_35", "IS_50", "IS_44", "SS_49", "IS_47", "SS_46", "IS_46")
+sgr.data.S <- sgr.data %>% filter(Structure %in% half.S) 
+
+# cleaning data
+sgr.data.1.S <- subset(sgr.data.S, Condition >= 80 | is.na(Condition))
+sgr.data.1.S <- subset(sgr.data.1.S, Date != "Average") # Exclude Average-data
+sgr.data.1.S <- subset(sgr.data.1.S, !(is.na(SGR))) # Exclude SGR with NA
+sgr.data.1.S <- sgr.data.1.S %>% separate(Structure, c('Treatment', 'Tree'))
+sgr.data.1.S$Treatment <- factor(sgr.data.1.S$Treatment, c("II", "SI", "SS", "IS"))
+sgr.data.1.S$Tree <- factor(sgr.data.1.S$Tree)
+sgr.data.1.S$Position <- factor(sgr.data.1.S$Position)
+sgr.data.1.S$Species <- factor(sgr.data.1.S$Species)
+sgr.data.1.S$Date <- ordered(sgr.data.1.S$Date, c("03/2023","04/2023", "05/2023", "06/2023"))
+
+# Exclude columns not used
+sgr.data.1.S <- sgr.data.1.S %>%
+  dplyr::select(-c("Length", "Cause", "Condition", "EV"))
+
+# Add column with observer
+constant_value <- "A"
+sgr.data.1.S["Observer"] <- constant_value
+
+# Visualize time effect
+sgr.data.summary.S <- data_summary(sgr.data.1.S, varname = "SGR", groupnames = c("Species", "Treatment", "Date"))
+
+ggplot(sgr.data.summary.S, aes(x = Date, fill = Treatment, y = SGR))+
+  geom_bar(stat = "identity", position = position_dodge(), na.rm = TRUE)+
+  labs(y = expression(paste("SGR (", d^-1,")")))+
+  scale_y_continuous(expand=c(0, 0), limits=c(-0.004, 0.024))+
+  facet_grid(Species ~ Treatment)+
+  geom_errorbar(aes(ymin=SGR-(1*se), ymax=SGR+(1*se)), width=.2,
+                position=position_dodge(.9))+
+  scale_fill_manual(values=c("#A9A9A9", "#7A7A7A", "#5A5A5A", "#3A3A3A"))+
+  theme_light()+
+  theme(
+    legend.position="top",
+    strip.text.y = element_text(size = 10, face = "italic"),
+    axis.text.x = element_text(size=11, angle = 90, vjust = 0.5, hjust=1),
+    axis.text.y = element_text(size=10))
+
+
+## JUDY HALF
+# creating data set with only Judys half plots
+half.J <- c("II_43", "SI_37", "SI_35", "SI_50", "II_44", "II_37", "II_31", "SI_39", "SI_44", "II_42", "II_33", "SI_43", "II_49", "II_46", "SI_34", "SI_49", "II_32", "SI_36", "SI_33", "II_50", "SS_47", "SS_41", "SS_37", "SS_39", "IS_31", "SS_36", "SS_45", "SS_40", "IS_41", "IS_45", "SS_48", "IS_48", "SS_33", "IS_42", "IS_38", "SS_44", "IS_43", "SS_50", "SS_43", "IS_35")  # select only half of the plot
+sgr.data.J <- sgr.data %>% filter(Structure %in% half.J) 
+
+# cleaning data
+sgr.data.1.J <- subset(sgr.data.J, Condition >= 80 | is.na(Condition))
+sgr.data.1.J <- subset(sgr.data.1.J, Date != "Average") # Exclude Average-data
+sgr.data.1.J <- subset(sgr.data.1.J, !(is.na(SGR))) # Exclude SGR with NA
+sgr.data.1.J <- sgr.data.1.J %>% separate(Structure, c('Treatment', 'Tree'))
+sgr.data.1.J$Treatment <- factor(sgr.data.1.J$Treatment, c("II", "SI", "SS", "IS"))
+sgr.data.1.J$Tree <- factor(sgr.data.1.J$Tree)
+sgr.data.1.J$Position <- factor(sgr.data.1.J$Position)
+sgr.data.1.J$Species <- factor(sgr.data.1.J$Species)
+sgr.data.1.J$Date <- ordered(sgr.data.1.J$Date, c("03/2023","04/2023", "05/2023", "06/2023"))
+
+# Exclude columns not used
+sgr.data.1.J <- sgr.data.1.J %>%
+  dplyr::select(-c("Length", "Cause", "Condition", "EV"))
+
+# Add column with observer
+constant_value <- "B"
+sgr.data.1.J["Observer"] <- constant_value
+
+# Visualize time effect
+sgr.data.summary.J <- data_summary(sgr.data.1.J, varname = "SGR", groupnames = c("Species", "Treatment", "Date"))
+
+ggplot(sgr.data.summary.J, aes(x = Date, fill = Treatment, y = SGR))+
+  geom_bar(stat = "identity", position = position_dodge(), na.rm = TRUE)+
+  labs(y = expression(paste("SGR (", d^-1,")")))+
+  scale_y_continuous(expand=c(0, 0), limits=c(-0.004, 0.024))+
+  facet_grid(Species ~ Treatment)+
+  geom_errorbar(aes(ymin=SGR-(1*se), ymax=SGR+(1*se)), width=.2,
+                position=position_dodge(.9))+
+  scale_fill_manual(values=c("#A9A9A9", "#7A7A7A", "#5A5A5A", "#3A3A3A"))+
+  theme_light()+
+  theme(
+    legend.position="top",
+    strip.text.y = element_text(size = 10, face = "italic"),
+    axis.text.x = element_text(size=11, angle = 90, vjust = 0.5, hjust=1),
+    axis.text.y = element_text(size=10))
+
+sgr.data.1.summary.J <- data_summary(sgr.data.1.J, varname = "SGR", groupnames = c("Species", "Treatment", "Date","Position"))
+
+# merge data Sara & Judy
+sgr.data.1.SJ <- rbind(sgr.data.1.S, sgr.data.1.J)
+
+# plot 
+sgr.data.summary.SJ <- data_summary(sgr.data.1.SJ, varname = "SGR", groupnames = c( "Treatment", "Date", "Observer"))
+
+ggplot(sgr.data.summary.SJ, aes(x = Date, fill = Treatment, y = SGR))+
+  geom_bar(stat = "identity", position = position_dodge(), na.rm = TRUE)+
+  labs(y = expression(paste("SGR (", d^-1,")")), x = "Date")+ facet_grid(rows=vars(Observer)) +
+  scale_y_continuous(expand=c(0, 0), limits=c(-0.004, 0.024))+
+  geom_errorbar(aes(ymin=SGR-(1*se), ymax=SGR+(1*se)), width=.2,
+                position=position_dodge(.9))+
+  scale_fill_manual(values=c("#A9A9A9", "#7A7A7A", "#5A5A5A", "#3A3A3A"))+
+  theme_light()+
+  theme(
+    legend.position="top",
+    strip.text.y = element_text(size = 10, face = "italic"),
+    axis.text.x = element_text(size=11, angle = 90, vjust = 0.5, hjust=1),
+    axis.text.y = element_text(size=10))
+
+
+```
+
+
+# SURVIVAL ANALYSIS
+
+```{r SURVIVAL: data preparation}
+
+#Import excel sheet
+clean.data.1 <- read_excel("~/Documents/WUR/MASTER/#SARAINKENYA/2.EXPERIMENT/1.Growth measurements/Analysis/Outcome/SGR/INT_Cleaning experiment_new.xlsx", sheet = 1)
+
+# Create survival dataframe
+# Split Structure in two other columns: Treatment, Tree
+# Set correct data types
+surv.data <- clean.data.1
+surv.data <- surv.data %>% separate(Structure, c('Treatment', 'Tree'))
+surv.data$Treatment <- factor(surv.data$Treatment, c("II", "IS", "SS", "SI"))
+surv.data$Tree <- factor(surv.data$Tree)
+surv.data$Structure<-clean.data.1$Structure
+surv.data$Species <- factor(surv.data$Species)
+
+## Overview
+surv.summary.time.Feb <- data_summary(surv.data, varname = "Condition", groupnames = c("Species","Treatment", "Date"))
+surv.summary.time.Feb <- subset(surv.summary.time.Feb, !Date == "Average")
+
+# considering effect of time
+surv.data.time <- subset(surv.data, !(Date == "Average"))
+# Exclude columns not used
+surv.data.time <- surv.data.time %>%
+  dplyr::select(-c("Length", "Cause", "EV"))
+
+# Survival plot per Treatment, Date and Species
+ggplot(surv.summary.time.Feb, aes(x = Date, fill = Treatment, y = Condition))+
+  geom_bar(stat = "identity", position = position_dodge(), na.rm = TRUE)+
+  labs(y = "Condition (%)")+
+  scale_y_continuous(expand=c(0, 0), limits=c(0, 110))+
+  facet_grid(Species ~ Treatment)+
+  geom_errorbar(aes(ymin=Condition-(1*se), ymax=Condition+(1*se)), width=.2,
+                position=position_dodge(.9))+
+  scale_fill_manual(values=c("#A9A9A9", "#7A7A7A", "#5A5A5A", "#3A3A3A")) +
+  theme_light()+
+  theme(
+    legend.position="top",
+    strip.text.y = element_text(size = 10, face = "italic"),
+    axis.text.x = element_text(size=11, angle = 90, vjust = 0.5, hjust=1),
+    axis.text.y = element_text(size=10))
+ggsave("All_SGR.tiff", width = 18, height = 24, units = "cm", dpi=1200, compression = "lzw")
+
+
+# decision of using March survival as a starting point (since the many dead fragments in February have nothing to do with treatments, but only with bleaching event)
+# Remove data from February
+surv.data <- subset(surv.data, Date != "02/2023")
+
+# Find the IDs where Condition is 0 in 03/2023
+ids_to_delete <- surv.data %>%
+  filter(Date == "03/2023" & Condition < 80) %>%
+  pull(id)
+
+# Remove all rows with the identified IDs after 03/2023
+surv.data <- surv.data %>%
+  filter(!(id %in% ids_to_delete & as.Date(Date, format = "%m/%Y") >= as.Date("03/2023", format = "%m/%Y")))
+
+
+## With time effect
+surv.summary.time <- data_summary(surv.data, varname = "Condition", groupnames = c("Species","Treatment", "Date"))
+surv.summary.time <- subset(surv.summary.time, !Date == "Average")
+
+# considering effect of time
+surv.data.time <- subset(surv.data, !(Date == "Average"))
+# Exclude columns not used
+surv.data.time <- surv.data.time %>%
+  dplyr::select(-c("Length", "Cause", "EV"))
+
+# Survival plot per Treatment, Date and Species
+ggplot(surv.summary.time, aes(x = Date, fill = Treatment, y = Condition))+
+  geom_bar(stat = "identity", position = position_dodge(), na.rm = TRUE)+
+  labs(y = "Condition (%)")+
+  scale_y_continuous(expand=c(0, 0), limits=c(0, 110))+
+  facet_grid(Species ~ Treatment)+
+  geom_errorbar(aes(ymin=Condition-(1*se), ymax=Condition+(1*se)), width=.2,
+                position=position_dodge(.9))+
+  scale_fill_manual(values=c("#A9A9A9", "#7A7A7A", "#5A5A5A", "#3A3A3A")) +
+  theme_light()+
+  theme(
+    legend.position="top",
+    strip.text.y = element_text(size = 10, face = "italic"),
+    axis.text.x = element_text(size=11, angle = 90, vjust = 0.5, hjust=1),
+    axis.text.y = element_text(size=10))
+ggsave("All_SGR.tiff", width = 18, height = 24, units = "cm", dpi=1200, compression = "lzw")
+
+
+## Without time effect
+# Select condition at end of experiment only (ignore effect of time)
+surv.data.avg <- subset(surv.data, Date == "Average")
+# Exclude columns not used
+surv.data.avg <- surv.data.avg %>%
+  dplyr::select(-c("Length", "Cause", "EV"))
+
+# Get averages per structure, split per Species, Size and Treatment
+surv.summary.avg <- data_summary(surv.data.avg, varname = "Condition", groupnames = c("Species", "Treatment"))
+
+## Survival plot per treatment and species
+ggplot(surv.summary.avg, aes(x = Species, fill = Treatment, y = Condition))+
+  geom_bar(stat = "identity", position = position_dodge(), na.rm = TRUE)+
+  labs(y = "Condition (%)")+
+  scale_y_continuous(expand=c(0, 0), limits=c(0, 110))+
+  geom_errorbar(aes(ymin=Condition-(1*se), ymax=Condition+(1*se)), width=.2,
+                position=position_dodge(.9))+
+  scale_fill_manual(values=c("#A9A9A9", "#7A7A7A", "#5A5A5A", "#3A3A3A")) +
+  theme_light()+
+  theme(
+    legend.position="top",
+    strip.text.y = element_text(size = 10, face = "italic"),
+    axis.text.x = element_text(size=11, angle = 90, vjust = 0.5, hjust=1),
+    axis.text.y = element_text(size=10))
+ggsave("All_SGR.tiff", width = 18, height = 24, units = "cm", dpi=1200, compression = "lzw")
+
+```
+
+```{r SURVIVAL: model selection}
+
+# if necessary, re-install some packages due to errors
+# install.packages("glmmTMB", type="source")
+# remotes::install_github("glmmTMB/glmmTMB/glmmTMB")
+
+### WITH TIME EFFECT
+## LINEAR MODEL
+lm.surv.0r.time  <- gls(Condition ~ Date*Treatment*Species, method = "REML", na.action = na.omit, data = surv.data.time)
+Anova(lm.surv.0r.time)
+
+## LINEAR MIXED-EFFECT MODEL (tree as random factor)
+lme.surv.1r.time  <- lme(Condition ~ Date*Treatment*Species, method = "REML", na.action = na.omit, random = ~1 | Tree, data = surv.data.time)
+Anova(lm.surv.0r.time)
+
+## Allowing for heterogeneity among Species (showed best residuals of all Species * Treatment combis)
+lme.surv.1r.C.time  <- lme(Condition ~ Date*Treatment*Species, method = "REML", na.action = na.omit, random = ~1 | Tree, data = surv.data.time, weights = varIdent(form = ~1 | Species))
+Anova(lme.surv.1r.C.time)
+
+## FULL BETA REGRESSION MODEL
+# data selection and cleaning
+surv.data.time <- surv.data.time %>%
+  dplyr::select(-c("SGR"))
+
+# Data prep
+## Set ID
+surv.data.time <- tibble::rownames_to_column(surv.data.time, "ID")
+
+## Transform survival (%) into fraction
+surv.data.time <- surv.data.time %>% mutate(Condition.f = Condition/100)
+
+## Re-scale so there are no 0 and 1 in the dataset
+surv.data.time<- surv.data.time %>% 
+  mutate(Condition.fc = (Condition.f * (length(Condition.f) - 1) + 0.5) / length(Condition.f))
+
+fbm.surv.time <- betareg(Condition.fc ~ Date*Species*Treatment, data = surv.data.time)
+car::Anova(fbm.surv.time) # Two-way interaction has a strong significant effect. Treatment and species have a strong significant effect as well
+
+## FULL BETA REGRESSION MODEL + MIXED-EFFECT (tree as random facrtors)
+# Install and load the required packages if necessary
+# install.packages("glmmTMB")
+# library(glmmTMB)
+
+# Fit a mixed-effects beta regression model
+fbm.1r.surv.time <- glmmTMB(Condition.fc ~ Date*Species*Treatment + (1 | Structure), 
+                 family = beta_family(link = "logit"), 
+                 data = surv.data.time)
+car::Anova(fbm.1r.surv.time) # treatment has a strong significant effect; Species and two-way interaction have a significant effect
+
+## AVERAGED BETA REGRESSION MODEL
+# Get average condition per structure, split per Species, Tree and Treatment
+surv.avg.time <- data_summary(surv.data.time, varname = "Condition", groupnames = c("Date", "Species", "Treatment", "Tree"))
+surv.avg.time <- surv.avg.time %>% 
+  dplyr::select(-c("sd", "se"))
+
+# Data preparation
+# Create dataset with average Condition per tree per treatment
+surv.avg.1.time <- surv.avg.time
+skewness(surv.avg.1.time$Condition)
+
+## Set ID
+surv.avg.1.time <- tibble::rownames_to_column(surv.avg.1.time, "ID")
+
+## Transform survival (%) into fraction
+surv.avg.1.time <- surv.avg.1.time %>% mutate(Condition.f = Condition/100)
+
+## Re-scale so there are no 0 and 1 in the dataset
+surv.avg.1.time<- surv.avg.1.time %>% 
+  mutate(Condition.fc = (Condition.f * (length(Condition.f) - 1) + 0.5) / length(Condition.f))
+
+abm.surv.time <- betareg(Condition.fc ~ Date*Species*Treatment, data = surv.avg.1.time)
+car::Anova(abm.surv.time) # Only Treatment has a strongly significant effect
+
+
+### WITHOUT TIME EFFECT
+# Anova showed that Date is never significant, so we continue the analysis without considering the effect of time
+## LINEAR MODEL
+lm.surv.0r  <- gls(Condition ~ Treatment*Species, method = "REML", na.action = na.omit, data = surv.data.avg) # AIC = 5957.305
+Anova(lm.surv.0r) # Treatment, Species and two-way interactions are all highly significant
+
+## LINEAR MIXED-EFFECT MODEL (tree as random factor)
+lme.surv.1r  <- lme(Condition ~ Treatment*Species, method = "REML", na.action = na.omit, random = ~1 | Tree, data = surv.data.avg) # AIC = 5923.095
+Anova(lme.surv.1r)
+
+## Allowing for heterogeneity among Species (showed best residuals of all Species * Treatment combis)
+lme.surv.1r.C  <- lme(Condition ~ Treatment*Species, method = "REML", na.action = na.omit, random = ~1 | Tree, data = surv.data.avg, weights = varIdent(form = ~1 | Species)) # AIC = 5853.400
+Anova(lme.surv.1r.C) #treatment and treatment:species are highly significant; species is significant
+
+## FULL BETA REGRESSION MODEL
+# data selection and cleaning
+surv.data.avg <- surv.data.avg %>%
+  dplyr::select(-c("SGR"))
+
+# Data prep
+## Set ID
+surv.data.avg <- tibble::rownames_to_column(surv.data.avg, "ID")
+
+## Transform survival (%) into fraction
+surv.data.avg <- surv.data.avg %>% mutate(Condition.f = Condition/100)
+
+## Re-scale so there are no 0 and 1 in the dataset
+surv.data.avg<- surv.data.avg %>% 
+  mutate(Condition.fc = (Condition.f * (length(Condition.f) - 1) + 0.5) / length(Condition.f))
+
+fbm.surv <- betareg(Condition.fc ~ Species*Treatment, data = surv.data.avg)
+car::Anova(fbm.surv) # Two-way interaction has a strong significant effect. Treatment and species have a strong significant effect as well
+
+## FULL BETA REGRESSION MODEL + MIXED-EFFECT (tree as random facrtors)
+# Install and load the required packages if necessary
+# install.packages("glmmTMB")
+# library(glmmTMB)
+
+# Fit a mixed-effects beta regression model
+fbm.1r.surv <- glmmTMB(Condition.fc ~ Species*Treatment + (1 | Structure), 
+                 family = beta_family(link = "logit"), 
+                 data = surv.data.avg)
+car::Anova(fbm.1r.surv) # treatment has a strong significant effect; Species and two-way interaction have a significant effect
+
+## AVERAGED BETA REGRESSION MODEL
+# Get average condition per structure, split per Species, Tree and Treatment
+surv.avg <- data_summary(surv.data.avg, varname = "Condition", groupnames = c("Species", "Treatment", "Tree"))
+surv.avg <- surv.avg %>% 
+  dplyr::select(-c("sd", "se"))
+
+# Data preparation
+# Create dataset with average Condition per tree per treatment
+surv.avg.1 <- surv.avg
+skewness(surv.avg.1$Condition)
+#skewness coefficient for surv.avg.1$Condition = -1.979195. So, it's negatively (left) skewed
+
+# Inverse transformation on negatively skewed data
+surv.avg.1$Condition <- 1/(max(surv.avg.1$Condition+1)-surv.avg.1$Condition)
+skewness(surv.avg.1$Condition)
+#skewness coefficient = -0.3821911
+
+## Set ID
+surv.avg.1 <- tibble::rownames_to_column(surv.avg.1, "ID")
+
+## Transform survival (%) into fraction
+surv.avg.1 <- surv.avg.1 %>% mutate(Condition.f = Condition/100)
+
+## Re-scale so there are no 0 and 1 in the dataset
+surv.avg.1<- surv.avg.1 %>% 
+  mutate(Condition.fc = (Condition.f * (length(Condition.f) - 1) + 0.5) / length(Condition.f))
+
+abm.surv <- betareg(Condition.fc ~ Species*Treatment, data = surv.avg.1)
+car::Anova(abm.surv) # Only Treatment has a strongly significant effect
+
+```
+
+```{r SURVIVAL: model validation}
+
+## model validation for LINEAR MODEL
+mod <- lm.surv.0r # set model to be validated
+op <- par(mfrow = c(2, 4), mar = c(5, 4, 1, 2)) # set layout of figure frame
+plot(resid(mod, type = "pearson") ~ fitted(mod)) # fitted vs residuals
+abline(0,0)
+hist(resid(mod, type = "pearson"), main = "") # histogram residuals
+qqnorm(resid(mod, type = "pearson")) # QQplot residuals
+# plot(surv.data$Treatment, resid(mod, type = "pearson")) # residuals split over Treatment
+abline(0,0)
+# plot(surv.data$Species, resid(mod, type = "pearson")) # residuals split over Species
+abline(0,0)
+# plot(fitted(mod) ~ surv.data$Condition) # response data vs fitted
+par(op)
+abline(0,0)
+
+## model validation for LINEAR MIXED-EFFECT MODEL
+mod <- lme.surv.1r # set model to be validated
+op <- par(mfrow = c(2, 4), mar = c(5, 4, 1, 2)) # set layout of figure frame
+plot(resid(mod, type = "pearson") ~ fitted(mod)) # fitted vs residuals
+abline(0,0)
+hist(resid(mod, type = "pearson"), main = "") # histogram residuals
+qqnorm(resid(mod, type = "pearson")) # QQplot residuals
+# plot(surv.data$Treatment, resid(mod, type = "pearson")) # residuals split over Treatment
+abline(0,0)
+# plot(surv.data$Species, resid(mod, type = "pearson")) # residuals split over Species
+abline(0,0)
+# plot(fitted(mod) ~ surv.data$Condition) # response data vs fitted
+par(op)
+abline(0,0)
+
+## model validation of FULL BETA REGRESSION MODEL
+mod <- fbm.surv # set model to be validated 
+op <- par(mfrow = c(2, 4), mar = c(5, 4, 1, 2)) # set layout of figure frame
+plot(resid(mod, type = "pearson") ~ fitted(mod)) # fitted vs residuals
+abline(0,0)
+hist(resid(mod, type = "pearson"), main = "") # histogram residuals
+qqnorm(resid(mod, type = "pearson")) # QQplot residuals
+# plot(surv.data.1$Species, resid(mod, type = "pearson")) # residuals split over Treatment
+abline(0,0)
+# plot(surv.data.1$Treatment, resid(mod, type = "pearson")) # residuals split over Treatment
+abline(0,0)
+# plot(fitted(mod) ~ surv.data.1$Condition.f) # response data vs fitted
+par(op)
+
+## model validation for FULL BETA REGRESSION MODEL + MIXED-EFFECT
+mod <- fbm.1r.surv # set model to be validated 
+op <- par(mfrow = c(2, 4), mar = c(5, 4, 1, 2)) # set layout of figure frame
+plot(resid(mod, type = "pearson") ~ fitted(mod)) # fitted vs residuals
+abline(0,0)
+hist(resid(mod, type = "pearson"), main = "") # histogram residuals
+qqnorm(resid(mod, type = "pearson")) # QQplot residuals
+# plot(surv.data.1$Species, resid(mod, type = "pearson")) # residuals split over Treatment
+abline(0,0)
+# plot(surv.data.1$Treatment, resid(mod, type = "pearson")) # residuals split over Treatment
+abline(0,0)
+# plot(fitted(mod) ~ surv.avg.1$Condition.fc) # response data vs fitted
+par(op)
+
+## model validation of AVERAGED BETA REGRESSION MODEL
+mod <- abm.surv # set model to be validated 
+op <- par(mfrow = c(2, 4), mar = c(5, 4, 1, 2)) # set layout of figure frame
+plot(resid(mod, type = "pearson") ~ fitted(mod)) # fitted vs residuals
+abline(0,0)
+hist(resid(mod, type = "pearson"), main = "") # histogram residuals
+qqnorm(resid(mod, type = "pearson")) # QQplot residuals
+# plot(surv.avg.1$Species, resid(mod, type = "pearson")) # residuals split over Treatment
+abline(0,0)
+# plot(surv.avg.1$Treatment, resid(mod, type = "pearson")) # residuals split over Treatment
+abline(0,0)
+# plot(fitted(mod) ~ surv.avg.1$Condition.fc) # response data vs fitted
+par(op)
+
+```
+
+```{r SURVIVAL: plots}
+
+# Treatment plot
+# Get averages
+surv.summary.T <- data_summary(surv.data, varname = "Condition", groupnames = c("Treatment"))
+
+# Create ID and order dataframe by name of Finder
+surv.summary.T <- tibble::rownames_to_column(surv.summary.T, "ID")
+surv.summary.T <- surv.summary.T[order(as.character(surv.summary.T$Treatment)),]
+
+# Post hoc comparison
+hsd.surv.T <- emmeans(abm.surv, specs = pairwise ~ Treatment, adjust = "tukey")
+sig.letters.surv.T <- multcomp::cld(hsd.surv.T$emmeans, alpha = 0.05, Letters = letters, decreasing = T)
+
+# Create ID and order dataframe by name (equals Finder of sgr.summary.SST dataframe)
+sig.letters.surv.T <- sig.letters.surv.T[order(as.character(sig.letters.surv.T$Treatment)),]
+sig.letters.surv.T <- sig.letters.surv.T %>% mutate(.group = str_squish(.group)) # remove white spaces
+
+# Merge sig.letter dataframe into the summary dataframe
+surv.summary.T <- cbind(surv.summary.T, siglet = sig.letters.surv.T$.group)
+surv.summary.T <- surv.summary.T[order(as.numeric(surv.summary.T$ID)),]
+
+# Plot Treatment 
+SURV_Treatment<-ggplot(surv.summary.T, aes(x = Treatment, y = Condition))+
+  geom_bar(stat = "identity", position = position_dodge())+ 
+  labs(y = "Condition (%)", x = "Treatment")+
+  geom_errorbar(aes(ymin=Condition-(1*se), ymax=Condition+(1*se)), width=.2,
+                position=position_dodge(.9))+
+  geom_text(data = surv.summary.T, aes(x=Treatment, y = Condition + se+4, label = siglet), vjust=0,
+            position=position_dodge(.9))+
+  theme_economist()+scale_colour_economist()+
+  theme(
+    axis.title.x = element_text(color="black", vjust=-2, size = 12, margin = margin(t = 10, r = 0, b = 0, l = 0)),
+    axis.text.x = element_text(angle = 0, size=12, face = "bold", vjust=0.5),
+    axis.title.y = element_text(color="black" , vjust=4, size = 12, margin = margin(t = 0, r = 10, b = 0, l = 10)),
+    axis.text.y=element_text(size=12, face = "bold", vjust=0.5)
+  )+
+  scale_x_discrete(labels= c("II", "IS", "SS", "SI"))+
+  scale_y_continuous(breaks= c(0, 25, 50, 75, 100), limits = c(0, 110), expand = c(0, 0))
+
+SURV_Treatment
+ggsave("INT_Survival(AVG)_Treatment.jpeg") #save image
+
+
+# Species plot
+# Get averages
+surv.summary.S <- data_summary(surv.data, varname = "Condition", groupnames = c("Species"))
+
+# Create ID and order dataframe by name of Finder
+surv.summary.S <- tibble::rownames_to_column(surv.summary.S, "ID")
+surv.summary.S <- surv.summary.S[order(as.character(surv.summary.S$Species)),]
+
+# Post hoc comparison
+hsd.surv.S <- emmeans(abm.surv, specs = pairwise ~ Species, adjust = "tukey") 
+sig.letters.surv.S <- multcomp::cld(hsd.surv.S$emmeans, alpha = 0.05, Letters = letters, decreasing = T)
+
+# Create ID and order dataframe by name (equals Finder of sgr.summary.SST dataframe)
+sig.letters.surv.S <- sig.letters.surv.S[order(as.character(sig.letters.surv.S$Species)),]
+sig.letters.surv.S <- sig.letters.surv.S %>% mutate(.group = str_squish(.group)) # remove white spaces
+
+# Merge sig.letter dataframe into the summary dataframe
+surv.summary.S <- cbind(surv.summary.S, siglet = sig.letters.surv.S$.group)
+surv.summary.S <- surv.summary.S[order(as.numeric(surv.summary.S$ID)),]
+
+# Plot Species 
+SURV_Species<-ggplot(surv.summary.S, aes(x = Species, y = Condition))+
+  geom_bar(stat = "identity", position = position_dodge())+ 
+  labs(y = "Condition (%)", x = "Species")+
+  geom_errorbar(aes(ymin=Condition-(1*se), ymax=Condition+(1*se)), width=.2,
+                position=position_dodge(.9))+
+  geom_text(data = surv.summary.S, aes(x=Species, y = Condition + se+4, label = ""), vjust=0,
+            position=position_dodge(.9))+
+  theme_economist()+scale_colour_economist()+
+  theme(
+    axis.title.x = element_text(color="black", vjust=-2, size = 12, margin = margin(t = 10, r = 0, b = 0, l = 0)),
+    axis.text.x = element_text(angle = 0, size=12, face = "bold", vjust=0.5),
+    axis.title.y = element_text(color="black" , vjust=4, size = 12, margin = margin(t = 0, r = 10, b = 0, l = 10)),
+    axis.text.y=element_text(size=12, face = "bold", vjust=0.5)
+  )+
+  scale_x_discrete(labels= c("A. tenuis", "S. pistillata"))+
+  scale_y_continuous(breaks= c(0, 25, 50, 75, 100), limits = c(0, 110), expand = c(0, 0))
+
+SURV_Species
+ggsave("INT_Survival(AVG)_Species.jpeg") #save image
+
+
+# Transparencies plot
+# Get averages
+surv.summary.TS <- data_summary(surv.data, varname = "Condition", groupnames = c("Treatment", "Species"))
+
+# Create ID and order dataframe by name of Finder
+surv.summary.TS <- tibble::rownames_to_column(surv.summary.TS, "ID")
+surv.summary.TS <- surv.summary.TS[order(as.character(surv.summary.TS$Treatment)),]
+surv.summary.TS <- surv.summary.TS[order(as.character(surv.summary.TS$Species)),]
+
+# Post hoc comparison
+hsd.surv.TS <- emmeans(abm.surv, specs = pairwise ~ Treatment*Species, adjust = "tukey") 
+sig.letters.surv.TS <- multcomp::cld(hsd.surv.TS$emmeans, alpha = 0.05, Letters = letters, decreasing = T)
+
+# Create ID and order dataframe by name (equals Finder of sgr.summary.SST dataframe)
+sig.letters.surv.TS <- sig.letters.surv.TS[order(as.character(sig.letters.surv.TS$Treatment)),]
+sig.letters.surv.TS <- sig.letters.surv.TS[order(as.character(sig.letters.surv.TS$Species)),]
+sig.letters.surv.TS <- sig.letters.surv.TS %>% mutate(.group = str_squish(.group)) # remove white spaces
+
+# Merge sig.letter dataframe into the summary dataframe
+surv.summary.TS <- cbind(surv.summary.TS, siglet = sig.letters.surv.TS$.group)
+surv.summary.TS <- surv.summary.TS[order(as.numeric(surv.summary.TS$ID)),]
+
+# Plot TreatmentxSpecies
+SURV_TreatmentxSpecies<-ggplot(surv.summary.TS, aes(x = Species, fill = Treatment, y = Condition))+
+  geom_bar(stat = "identity", position = position_dodge())+ 
+  labs(y = "Condition (%)", x = "Species")+
+  geom_errorbar(aes(ymin=Condition-(1*se), ymax=Condition+(1*se)), width=.2,
+                position=position_dodge(.9))+
+  geom_text(data = surv.summary.TS, aes(x=Species, y = Condition + se+4, label = ""), vjust=0,
+            position=position_dodge(.9))+
+  scale_fill_manual(values=c("#A9A9A9", "#7A7A7A", "#5A5A5A", "#3A3A3A"))+
+  theme_economist()+scale_colour_economist()+
+  theme(
+    axis.title.x = element_text(color="black", vjust=-2, size = 12, margin = margin(t = 10, r = 0, b = 0, l = 0)),
+    axis.text.x = element_text(angle = 0, size=12, face = "bold", vjust=0.5),
+    axis.title.y = element_text(color="black" , vjust=4, size = 12, margin = margin(t = 0, r = 10, b = 0, l = 10)),
+    axis.text.y=element_text(size=12, face = "bold", vjust=0.5)
+  )+
+  scale_x_discrete(labels= c("A. tenuis", "S. pistillata"))+
+  scale_y_continuous(breaks= c(0, 25, 50, 75, 100), limits = c(0, 110), expand = c(0, 0))
+
+SURV_TreatmentxSpecies
+ggsave("INT_Survival(AVG)_TreatmentxSpecies.jpeg") #save image
+
+```
+
+
+# Check packages used
+```{r}
+
+knitr::purl("Clean.Rmd")
+list.functions.in.file("Clean.R")
+unlink("Clean.R")
+
+```

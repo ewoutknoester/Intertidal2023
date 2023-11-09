@@ -1,0 +1,466 @@
+#___________________________________________________________________________________________________________
+# title: "INT2023_Fish"
+# authors: "Ewout Knoester & Sara Sottoriva"
+# date: "June 27, 2023"
+# output: html_document
+#___________________________________________________________________________________________________________
+  
+```{r setup}
+
+rm(list=ls()) # Clear workspace
+knitr::opts_knit$set(root.dir = '/tmp') #Set directory at current directory for all subsequent chunks
+setwd("~/Documents/WUR/MASTER/#SARAINKENYA/2.EXPERIMENT/3.Fish Surveys")
+getwd()
+options(scipen = 99) # Have all numbers in non-scientific notation
+
+library(readxl) # Join data frames (vlookup)
+library(cowplot) # Combine plots
+library(data.table)
+library(ggthemes) # pretty plots
+library(flextable) # Layout word table #it requires package htmltools version 0.5.4, but only 0.5.5 now exists
+library(tidyverse) # Beta regression
+library(vegan) # Export Excel
+library(gridExtra)
+library(emmeans) # Select text from string
+library(lmerTest) # GLS
+library(officer) # Move table into word
+library(gridGraphics) # Combine base and ggplots
+library(car) # glm model validation
+library(viridis) # Convert data from wide to long
+library(pairwise) #it was pairwiseAdonis, but that doesn't exist
+library(writexl) # Export Excel
+
+# Function to facilitate averaging data frame
+data_summary <- function(data, varname, groupnames){
+  require(plyr)
+  summary_func <- function(x, col){
+    c(mean = mean(x[[col]], na.rm=TRUE),
+      n  = length(x[[col]]),
+      sd = sd(x[[col]], na.rm=TRUE),
+      sum  = sum(x[[col]]),
+      se = sd(x[[col]], na.rm=TRUE)/sqrt(length(x[[col]])))
+  }
+  data_sum<-ddply(data, groupnames, .fun=summary_func,
+                  varname)
+  data_sum <- plyr::rename(data_sum, c("mean" = varname))
+  return(data_sum)
+}
+
+```
+
+```{r data selection, warning = FALSE}
+
+# ---- RAW DATA ----
+divRAW.2023 <- as.data.frame(read_excel("~/Documents/WUR/MASTER/#SARAINKENYA/2.EXPERIMENT/3.Fish Surveys/INT2023_Fish_RAW.xlsm", sheet = 3, skip = 6))
+div.2023 <- divRAW.2023[!is.na(divRAW.2023$Species),] # Remove unrelevant row
+div.2023 <- select(div.2023, -c(1, 3:11)) # Remove unrelevant columns
+div.2023$Species <- sub("\\.", "", div.2023$Species) # Remove points from species names
+
+## Get rid of the columns not needed (pre-calculated biomasses)
+div1 <- div.2023[, -grep(pattern= 'g_', colnames(div.2023))]
+div2 <- div1[, -grep(pattern='kgha', colnames(div1))]
+div3 <- div2[, -grep(pattern='TOT', colnames(div2))]
+div3$Species <- as.factor(div3$Species)
+div <- div3
+
+# Net NAs to 0 
+div[is.na(div)] <- 0
+
+## Set column names
+surveys.tot <- (ncol(div) - 1)/13
+colname <- c("Species", paste0(rep(c("1_", "2_", "3_", "4_", "5_", "6_", "7_", "8_", "9_", "10_", "11_", "12_", "Coloured_"), surveys.tot), rep(1:surveys.tot, each = 13)))
+colnames(div) <- colname
+
+## Go to long format
+div <- setDT(div)
+div <- melt(div, 
+            id.vars = 'Species', variable.name = 'Survey', 
+            measure.vars = patterns('^1_', '^2_', '^3_', '^4_', '^5_', '^6_',
+                                    '^7_', '^8_', '^9_', '^10_', '^11_', '^12_', '^Coloured_'),
+            value.name = c('1.25', '3.75', '6.25', '8.75', '12.5', '17.5',
+                           '25', '35', '45', '75', '125', '175', 'Coloured'))
+div$Coloured[div$Coloured == 0] <- 12 # Set non-coloured value (12) for missing data
+
+# ---- META DATA ----
+# ==== Surveys ====
+SurveysData <- as.data.frame(read_excel("~/Documents/WUR/MASTER/#SARAINKENYA/2.EXPERIMENT/3.Fish Surveys/INT2023_Fish_RAW.xlsm", sheet = "Data")) 
+SurveysData <- SurveysData[!is.na(SurveysData$Date),] # Remove empty rows
+
+#Clean up
+SurveysData <- SurveysData[,-c(6:8,27:50)] # Remove unnecessary columns 
+
+# Net NAs to 0 
+SurveysData[is.na(SurveysData)] <- 0
+
+# ==== Species information ====
+specieslist <- as.data.frame(read_excel("~/Documents/WUR/MASTER/#SARAINKENYA/2.EXPERIMENT/3.Fish Surveys/SpeciesList.xlsx"))
+specieslist$Species <- sub("\\.", "", specieslist$Species) # Remove points from species names
+
+# ==== Export data sets ====
+## Fish survey data
+write_xlsx(div, "Structural complexity_Fish surveys.xlsx")
+
+## Fish survey metadata
+write_xlsx(SurveysData, "Structural complexity_Fish metadata.xlsx")
+
+## Fish species list
+write_xlsx(specieslist, "Structural complexity_Fish species list.xlsx")
+
+```
+
+```{r load data}
+
+# Load data sets
+fish <- as.data.frame(read_excel("Structural complexity_Fish surveys.xlsx"))
+surveys <- as.data.frame(read_excel("Structural complexity_Fish metadata.xlsx"))
+specieslist <- as.data.frame(read_excel("Structural complexity_Fish species list.xlsx"))
+
+# Set data types
+fish$Survey <- as.numeric(fish$Survey)
+surveys$Survey <- as.numeric(surveys$Survey)
+
+tofactors <- c('Transect', 'Observer') 
+surveys[tofactors] <- lapply(surveys[tofactors], factor)
+
+tofactors <- c('Species', 'Diet')
+specieslist[tofactors] <- lapply(specieslist[tofactors], factor)
+
+# Get total list of surveys (also those without any observations)
+totsur <- as.data.frame(unique(fish$Survey)) 
+names(totsur) <- "SurveyNo"
+
+```
+
+```{r species richness}
+# richness = number of species
+
+## DATA PREPARATION
+ric <- select(fish, -c('Coloured')) # Remove Coloured column
+ric$SpeciesAbundance <- rowSums(ric[, 3:14]) # Sum abundance over all size categories
+ric <- ric[ric$SpeciesAbundance != 0,] # Remove the rows with no abundance
+ric <- ric[, -c(3:14)]
+
+# Add Diet level
+specieslist.1 <- specieslist[, -c(3, 4, 6:13)]
+ric.1 <- merge(ric, specieslist.1, by = "Species")
+
+# Add Transect
+surveys.1 <- surveys[, -c(3, 6:24)]
+ric.2 <- merge(ric.1, surveys.1, by = "Survey")
+
+# Total species encountered per survey
+ric.3 <- aggregate(Species ~ Survey, data=ric.2, length)
+ric.3 <- merge(ric.3, surveys.1, by = "Survey") # re-add survey info (date, transect, observer)
+
+### MODELLING
+## Linear mixed-effect model with Date as random factor
+# Random factor to account for non-independence of multiple surveys taken by different observers on the same day and transect
+lme.ric.1r  <- lme(Species ~ Transect, method = "REML", na.action = na.omit, random = ~1 | Date, data = ric.3)
+Anova(lme.ric.1r) #not significant
+
+## Model validation
+mod <- lme.ric.1r # set model to be validated
+op <- par(mfrow = c(2, 4), mar = c(5, 4, 1, 2)) # set layout of figure frame
+plot(resid(mod, type = "pearson") ~ fitted(mod)) # fitted vs residuals
+abline(0,0)
+hist(resid(mod, type = "pearson"), main = "") # histogram residuals
+qqnorm(resid(mod, type = "pearson")) # QQplot residuals
+
+
+### PLOTS
+# Get averages
+ric.summary <- data_summary(ric.3, varname = "Species", groupnames = c("Transect"))
+  
+# Create unique Finder for each Transect combination
+ric.summary <- as.data.frame(append(ric.summary,
+    list(Finder = paste(ric.summary$Transect,
+    sep=":")), after = 0))
+
+# Create ID and order dataframe by name of Finder
+ric.summary <- tibble::rownames_to_column(ric.summary, "ID")
+ric.summary <- ric.summary[order(ric.summary$Finder),]
+
+## Plot Transect 
+ric_Transect <- ggplot(ric.summary, aes(x = Transect, y = Species))+
+  geom_bar(stat = "identity", position = position_dodge())+ 
+  labs(y = expression(paste("Species richness")), x = "Transect")+ 
+  geom_errorbar(aes(ymin=Species-(1*se), ymax=Species+(1*se)), width=.2,
+                position=position_dodge(.9))+
+  scale_fill_manual(values=c("#A9A9A9", "#7A7A7A", "#5A5A5A", "#3A3A3A"))+
+  theme_economist()+scale_colour_economist()+
+  theme(
+    axis.title.x = element_text(color="black", vjust=-2, size = 12),
+    axis.text.x = element_text(angle = 0, size=11, face = "bold", vjust=0.5),
+    axis.title.y = element_text(color="black" , vjust=4, size = 12,),
+    axis.text.y=element_text(size=12, face = "bold", vjust=0.5),
+    )+
+  labs(x="Patch") +
+  scale_y_continuous(limits=c(0,29), breaks = c(0, 5, 10, 15, 20, 25), expand = c(0, 0))
+
+ric_Transect
+ggsave("INT_ric_Transect.jpeg")
+
+```
+
+```{r abundance}
+# abundance = nr of individuals
+
+## DATA PREPARATION
+ab <- ric.2
+
+# Abundance encountered per survey
+ab.1 <- aggregate(SpeciesAbundance ~ Survey, data=ab, sum)
+ab.2 <- merge(ab.1, surveys.1, by = "Survey") # re-add survey info (date, transect, observer)
+
+
+### MODELLING
+## Linear mixed-effect model with Date as random factor
+# Random factor to account for non-independence of multiple surveys taken by different observers on the same day and transect
+lme.ab.1r  <- lme(SpeciesAbundance ~ Transect, method = "REML", na.action = na.omit, random = ~1 | Date, data = ab.2) 
+Anova(lme.ab.1r) #significant (p-value=0.003346)
+
+## Model validation
+mod <- lme.ab.1r # set model to be validated
+op <- par(mfrow = c(2, 4), mar = c(5, 4, 1, 2)) # set layout of figure frame
+plot(resid(mod, type = "pearson") ~ fitted(mod)) # fitted vs residuals
+abline(0,0)
+hist(resid(mod, type = "pearson"), main = "") # histogram residuals
+qqnorm(resid(mod, type = "pearson")) # QQplot residuals
+
+
+## PLOTS
+# Get averages
+ab.summary <- data_summary(ab.2, varname = "SpeciesAbundance", groupnames = c("Transect"))
+
+# Create unique Finder for each Transect combination
+ab.summary <- as.data.frame(append(ab.summary,
+    list(Finder = paste(ab.summary$Transect,
+    sep=":")), after = 0))
+
+# Create ID and order dataframe by name of Finder
+ab.summary <- tibble::rownames_to_column(ab.summary, "ID")
+ab.summary <- ab.summary[order(ab.summary$Finder),]
+
+# Post hoc comparison
+hsd.T <- emmeans(lme.ab.1r, specs = pairwise ~ Transect, adjust = "tuckey") 
+letters.T <- multcomp::cld(hsd.T$emmeans, alpha = 0.05, Letters = letters, decreasing = T) # get CLD
+
+# Create ID and order dataframe by name
+letters.T <- tibble::rownames_to_column(letters.T, "Group")
+letters.T <- as.data.frame(append(letters.T,
+     list(Finder = paste(letters.T$Transect,
+    sep=":")), after = 0))
+letters.T <- letters.T[order(letters.T$Finder),]
+letters.T <- letters.T %>% mutate(.group = str_squish(.group)) # remove white spaces
+
+# Merge sig.letter dataframe into the summary dataframe
+ab.summary <- cbind(ab.summary, siglet = letters.T$.group)
+ab.summary <- ab.summary[order(as.numeric(ab.summary$ID)),]
+
+## Plot Treatment 
+ab_Transect <- ggplot(ab.summary, aes(x = Transect, y = SpeciesAbundance))+
+  geom_bar(stat = "identity", position = position_dodge())+ 
+  labs(y = expression(paste("Abundance")), x = "Transect")+ 
+  geom_errorbar(aes(ymin=SpeciesAbundance-(1*se), ymax=SpeciesAbundance+(1*se)), width=.2,
+                position=position_dodge(.9))+
+  geom_text(data = ab.summary, aes(x=Transect, y = SpeciesAbundance + se+0.0015, label = siglet),vjust=0, position = position_dodge(.9))+
+  scale_fill_manual(values=c("#A9A9A9", "#7A7A7A", "#5A5A5A", "#3A3A3A"))+
+  theme_economist()+scale_colour_economist()+
+  theme(
+    axis.title.x = element_text(color="black", vjust=-2, size = 12),
+    axis.text.x = element_text(angle = 0, size=11, face = "bold", vjust=0.5),
+    axis.title.y = element_text(color="black" , vjust=4, size = 12),
+    axis.text.y=element_text(size=12, face = "bold", vjust=0.5),
+    )+
+  labs(x="Patch") +
+  scale_y_continuous(limits=c(0,110), breaks = c(0, 20, 40, 60, 80, 100), expand = c(0, 0))
+
+ab_Transect
+ggsave("ab_Transect.jpeg")
+
+```
+
+```{r biomass}
+# biomass = total biomass
+
+## DATA PREPARATION
+bio <- fish[rowSums(fish[,3:14]) != 0, ] # Remove species not observed in a survey
+bio <- bio[bio$Coloured == 12, ] # Remove non-instantaneous data (colored Excel cells)
+bio <- select(bio, -c("Coloured"))
+
+# Add info
+bio <- merge(bio, surveys, all.x=T, by='Survey')
+bio <- merge(bio, specieslist, all.x=T, by='Species')
+
+# Get Size class from wide to long
+bio <- reshape2::melt(bio, id.vars = c('Survey', 'Transect', 'Species', 'Diet', 'a', 'b', 'Area'), 
+                      measure.vars = c('1.25', '3.75', '6.25', '8.75', '12.5', '17.5', '25', '35', '45', '75', '125', '175'),
+                      variable.name = 'SizeClass', value.name = 'Abundance')
+
+# Cleanup
+bio <- bio[bio$Abundance != 0,] # Remove size classes not observed per species (to speed up R)
+bio$SizeClass <- as.numeric(paste(bio$SizeClass)) # Set a numeric Length
+
+# Calculate biomass using the length-weight formula W = a * L^b, multiply per abundance and standardize to kg/ha
+bio$Biomass_ha <- ((((bio$a * (bio$SizeClass ^ bio$b)) * bio$Abundance)/ bio$Area)/1000)* 10000
+
+## Make already a grouping, for Ordination analysis on Diet level
+bioDiet <- spread(bio, key = Diet, value = Biomass_ha) # Make Diet section from long to wide
+bioDiet <- bioDiet[,-c(2:4)] #Remove unnecessary columns
+bioDiet[is.na(bioDiet)] <- 0
+bioDiet <- merge(bioDiet, totsur, all.y=T) # Re-add surveys without observations
+bioDiet[is.na(bioDiet)] <- 0
+bioDiet <- aggregate(. ~ Survey, data = bioDiet, FUN = sum) # Sum each Diet per Survey
+
+# sum biomass per survey
+bio.1 <- aggregate(Biomass_ha ~ Survey, data=bio, sum)
+bio.2 <- merge(bio.1, surveys.1, by = "Survey") # re-add survey info (date, transect, observer)
+
+
+### MODELLING
+## Linear mixed-effect model with Date as random factor
+# Random factor to account for non-independence of multiple surveys taken by different observers on the same day and transect
+lme.bio.1r  <- lme(Biomass_ha ~ Transect, method = "REML", na.action = na.omit, random = ~1 | Date, data = bio.2) 
+Anova(lme.bio.1r) #not significant
+
+## Model validation
+mod <- lme.bio.1r # set model to be validated
+op <- par(mfrow = c(2, 4), mar = c(5, 4, 1, 2)) # set layout of figure frame
+plot(resid(mod, type = "pearson") ~ fitted(mod)) # fitted vs residuals
+abline(0,0)
+hist(resid(mod, type = "pearson"), main = "") # histogram residuals
+qqnorm(resid(mod, type = "pearson")) # QQplot residuals
+
+# Get averages
+bio.summary <- data_summary(bio.2, varname = "Biomass_ha", groupnames = c("Transect"))
+
+# Create unique Finder for each Transect combination
+bio.summary <- as.data.frame(append(bio.summary,
+    list(Finder = paste(bio.summary$Transect,
+    sep=":")), after = 0))
+
+# Create ID and order dataframe by name of Finder
+bio.summary <- tibble::rownames_to_column(bio.summary, "ID")
+bio.summary <- bio.summary[order(bio.summary$Finder),]
+
+## Plot Transect 
+bio_Transect <- ggplot(bio.summary, aes(x = Transect, y = Biomass_ha))+
+  geom_bar(stat = "identity", position = position_dodge())+ 
+  labs(y = expression(paste("Biomass (kg/ha)")), x = "Transect")+ 
+  geom_errorbar(aes(ymin=Biomass_ha-(1*se), ymax=Biomass_ha+(1*se)), width=.2,
+                position=position_dodge(.9))+
+  scale_fill_manual(values=c("#A9A9A9", "#7A7A7A", "#5A5A5A", "#3A3A3A"))+
+  theme_economist()+scale_colour_economist()+
+  theme(
+    axis.title.x = element_text(color="black", vjust=-2, size = 12),
+    axis.text.x = element_text(angle = 0, size=11, face = "bold", vjust=0.5),
+    axis.title.y = element_text(color="black" , vjust=4, size = 12,),
+    axis.text.y=element_text(size=12, face = "bold", vjust=0.5),
+    )+
+  labs(x="Patch") +
+  scale_y_continuous(limits=c(0,125), breaks = c(0, 20, 40, 60, 80, 100, 120), expand = c(0, 0))
+
+bio_Transect
+ggsave("INT_bio_Transect.jpeg")
+
+
+### Combine Species richness, Abundance, and Biomass together
+library(gridExtra)
+combined_grid <- grid.arrange(ric_Transect, ab_Transect, bio_Transect, ncol = 2)
+
+# Print the combined grid
+print(combined_grid)
+
+```
+
+```{r community analysis}
+
+### SPECIES 
+## Data prep
+### Create data frame
+bio.ord <- spread(bio, key = Species, value = Biomass_ha) # Wide to long
+bio.ord[is.na(bio.ord)] <- 0
+bio.ord <- aggregate(. ~ Survey, data = bio.ord, FUN = sum, na.action = na.omit) # Sum each Species per Survey
+
+### Add info and re-add surveys without observations
+bio.ord <- left_join(surveys[, c(1:6)], bio.ord, by = "Survey")
+
+### Data selection
+bio.ord[is.na(bio.ord)] <- 0 # Set all Species to 0 for surveys without observations
+
+## Select subsets (we continue analysisng only Judy's surveys)
+bio.ord <- subset(bio.ord, Observer == "Judy Nduta")
+
+#### Create a bc mean distance table 
+BCtable.Bio.Specs <- vegdist(bio.ord[,14:ncol(bio.ord)], "bray")
+BCtable.Bio.Specs.tab <- as.data.frame(meandist(BCtable.Bio.Specs, bio.ord$Transect.x, cluster=average))
+
+#### NMDS
+NMDS.Bio.Spec <- metaMDS(bio.ord[,14:ncol(bio.ord)], distance = "bray", k = 2, trymax=3000, autotransform = FALSE) 
+
+## Plot
+# Adjust font size based on % of surveys in which a species is seen
+specsizes.bio <- bio.ord[,14:ncol(bio.ord)]
+specsizes.bio <- colSums(specsizes.bio)
+specsizes.bio.min <- min(specsizes.bio)
+specsizes.bio.max <- max(specsizes.bio)
+cex.bio.min <- 0.05
+cex.bio.max <- 2
+specsizes.bio <- ((specsizes.bio - specsizes.bio.min)/(specsizes.bio.max-specsizes.bio.min)) * (cex.bio.max - cex.bio.min) + cex.bio.min
+
+# Create a custom color palette for Transect.x
+unique_transects <- unique(bio.ord$Transect.x)
+num_transects <- length(unique_transects)
+custom_palette <- rainbow(num_transects)
+
+# Map Transect.x values to custom colors
+bio.ord$Transect.Color <- custom_palette[match(bio.ord$Transect.x, unique_transects)]
+
+# Plot for species level
+pdf(NULL)
+dev.control(displaylist = "enable")
+ordiplot(NMDS.Bio.Spec, type = "none", cex = 0.3, ylim = c(-1.1, 1.1), xlim = c(-0.1, 0.9), col = bio.ord$Transect.Color)
+points(NMDS.Bio.Spec$points, pch = 19, col = bio.ord$Transect.Color) # to plot each survey individually
+orditorp(NMDS.Bio.Spec, display = "sites", groups = bio.ord$Transect.x, col = bio.ord$Transect.Color, add = TRUE, label = FALSE, cex = 0.3, pch = 19)
+ordipointlabel(NMDS.Bio.Spec, display = "species", scaling = "symmetric", add = TRUE,
+               cex = specsizes.bio, font = 3)
+legend(legend = levels(bio.ord$Transect.x), col = custom_palette, pch = 19, cex = 0.8, bty = "n", ncol = 1, x.intersp = 1, y.intersp = 2, title = "Patch", x = 2.4, y = -0.4)
+Ordi.Sp.Sp <- recordPlot()
+invisible(dev.off())
+
+Ordi.Sp.Sp <- plot_grid(Ordi.Sp.Sp) + theme(plot.margin = unit(c(0, 0, 0, 0), "cm"))
+
+print(Ordi.Sp.Sp)
+
+
+### DIETARY GUILD
+# Groupling species based on their diet
+## Data prep
+# Create data frame
+bioBrayDiet <- merge(surveys[, c(1:6)], bioDiet, all.x=T)
+
+# Data selection (only Judy's surveys)
+bioBrayDiet <- subset(bioBrayDiet, Observer == "Judy Nduta")
+
+## Plot
+bioBrayDiet <- select(bioBrayDiet, -c(1:3, 5:10, 18, 19)) #remove unnecessary columns
+bioBrayDiet <- aggregate(. ~ Transect, data=bioBrayDiet, FUN=sum) #aggregate per transect
+bioBrayDiet <- gather(bioBrayDiet, key="Diet", value="Biomass", -Transect)
+
+# Plot Percent stacked barchart - diet level
+plot.diet <- ggplot(bioBrayDiet, aes(fill=Diet, y=Biomass, x=Transect)) + 
+    geom_bar(position="fill", stat="identity") +
+   theme_economist()+scale_colour_economist()+
+  scale_fill_manual(values =c("#FF0000", "#00FF00", "#0000FF", "#FFFF00", "#800080", "#FFA500", "#000000")) +
+  theme(legend.position = "right", 
+        legend.text = element_text(size = 11),
+        legend.title = element_text(size = 13),
+        axis.title.x = element_text(color="black", vjust=-2, size = 14),
+        axis.text.x = element_text(angle = 0, size=11, face = "bold", vjust=0.5),
+        axis.title.y = element_text(color="black" , vjust=4, size = 14,),
+        axis.text.y=element_text(size=12, face = "bold", vjust=0.5),) +
+  labs(x = "Patch")
+print(plot.diet)
+
+```
+
